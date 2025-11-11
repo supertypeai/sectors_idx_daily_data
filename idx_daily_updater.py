@@ -32,7 +32,7 @@ def get_daily_data():
 
     end = datetime.today()
 
-    url = f"https://www.idx.co.id/primary/TradingSummary/GetStockSummary?length=9999&start=0&date=20251110"#{end.strftime('%Y%m%d')}"
+    url = f"https://www.idx.co.id/primary/TradingSummary/GetStockSummary?length=9999&start=0&date={end.strftime('%Y%m%d')}"
     
     headers = {
         "User-Agent": (
