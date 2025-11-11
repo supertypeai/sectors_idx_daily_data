@@ -102,7 +102,7 @@ records = upload_data.to_dict(orient='records')
 initiate_logging(LOG_FILENAME)
 
 try:
-    # supabase.table('idx_daily_data').upsert(records).execute()
+    supabase.table('idx_daily_data').upsert(records).execute()
     logging.info(f'🟢 Finish upserting data for {datetime.today()}, with {upload_data.shape[0]} companies appended')
     print(f'🟢 Finish upserting data for {datetime.today()}, with {upload_data.shape[0]} companies appended')
 except:
