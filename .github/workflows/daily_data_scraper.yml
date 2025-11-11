@@ -1,5 +1,5 @@
 
-name: Incomplete Stock and Null Market Cap Handler
+name: Daily Data Scraper
 
 on:
   schedule:
