@@ -3,7 +3,7 @@ name: Daily Data Scraper
 
 on:
   schedule:
-    - cron: '0 12 * * 1-5' # Run every tuesday-saturday at 10.00am (Western Indonesia Time)
+    - cron: '0 11 * * 1-5' # Run every tuesday-saturday at 10.00am (Western Indonesia Time)
   
   workflow_dispatch:
       
