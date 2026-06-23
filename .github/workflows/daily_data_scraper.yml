@@ -2,9 +2,9 @@
 name: Daily Data Scraper
 
 on:
-  schedule:
-    - cron: '0 11 * * 1-5' # Run every tuesday-saturday at 10.00am (Western Indonesia Time)
-  
+  # Scheduled trigger lives in cron-job.org (calls workflow_dispatch via GitHub REST API).
+  # GH Actions cron suffered 3-5h queue drift on the 11:00 UTC slot; cron-job.org
+  # gives sub-minute precision so the scrape lands at 18:00 WIB sharp.
   workflow_dispatch:
       
 
