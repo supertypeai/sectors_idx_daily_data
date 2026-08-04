@@ -33,7 +33,7 @@ def get_daily_data():
     end = datetime.today()
 
     url = f"https://www.idx.co.id/primary/TradingSummary/GetStockSummary?length=9999&start=0&date={end.strftime('%Y%m%d')}"
-    
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -65,24 +65,27 @@ def get_daily_data():
     except:
         print(f"🔴error for date {end}")
 
-    full_df = full_df[['Date','StockCode','Close','ListedShares','Volume','ForeignSell','ForeignBuy']].drop_duplicates()
+    full_df = full_df[['Date','StockCode','Close','ListedShares','Volume','ForeignSell','ForeignBuy','OpenPrice','High','Low','Value']].drop_duplicates()
     full_df['StockCode'] = full_df['StockCode']+".JK"
 
     full_df['Close'] = full_df['Close'].astype(int)
     full_df['Volume'] = full_df['Volume'].astype(int)
     full_df['ForeignSell'] = full_df['ForeignSell'].astype(int)
     full_df['ForeignBuy'] = full_df['ForeignBuy'].astype(int)
-
+    full_df['OpenPrice'] = full_df['OpenPrice'].astype(int)
+    full_df['High'] = full_df['High'].astype(int)
+    full_df['Low'] = full_df['Low'].astype(int)
+    full_df['Value'] = full_df['Value'].astype(int)
     full_df['market_cap'] = full_df['Close'] * full_df['ListedShares']
     full_df['market_cap'] = full_df['market_cap'].astype(int)
 
-    full_df = full_df.rename(columns={"StockCode": "symbol", "Close": "close",  "Volume": "volume",'Date':'date','ForeignSell':"foreign_sell_volume",'ForeignBuy':'foreign_buy_volume'})
+    full_df = full_df.rename(columns={"StockCode": "symbol", "Close": "close",  "Volume": "volume",'Date':'date','ForeignSell':"foreign_sell_volume",'ForeignBuy':'foreign_buy_volume', 'OpenPrice':'open','High':'high','Low':'low','Value':'value'})
 
     full_df['mcap_method'] = "1"
 
     full_df["updated_on"] = pd.Timestamp.now(tz="GMT").strftime("%Y-%m-%d %H:%M:%S")
 
-    full_df = full_df[['date','symbol','close','volume','market_cap','foreign_sell_volume','foreign_buy_volume','mcap_method','updated_on']]
+    full_df = full_df[['date','symbol','close','volume','market_cap','foreign_sell_volume','foreign_buy_volume','open','high','low','value','mcap_method','updated_on']]
 
     full_df['date'] = pd.to_datetime(full_df['date'])
 
