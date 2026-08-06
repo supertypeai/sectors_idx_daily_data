@@ -42,4 +42,5 @@ tzdata==2025.2
 urllib3==2.5.0
 websockets==15.0.1
 yarl==1.22.0
+yfinance==1.5.2
 zope.interface==8.1
