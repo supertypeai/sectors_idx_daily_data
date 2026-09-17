@@ -29,38 +29,83 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key)
 
+OHL_COLS = ["open", "high", "low"]
 YF_FILL_COLS = {"open": "Open", "high": "High", "low": "Low"}
 
 
-def fill_ohl_from_yfinance(df, date):
-    """IDX leaves OpenPrice/High/Low at 0 for some rows — backfill those columns
-    from Yahoo. Each column is filled independently and only where it is 0, so a
-    row with a real high but a zero open only has its open replaced. Nothing
-    outside these three columns is touched, and a symbol Yahoo has no usable
-    price for keeps its 0."""
+IQPLUS_TIMEOUT = 20
+IQPLUS_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-    needs = df[list(YF_FILL_COLS)].eq(0).any(axis=1)
+
+def _fetch_iqplus_ohl(symbol: str, target_date_str: str, session: requests.Session = None) -> dict:
+    code = symbol.replace(".JK", "").upper()
+    url = f"https://www.iqplus.info/api/v1/ohlcv.php?code={code}"
+    http = session or requests
+    try:
+        resp = http.get(url, headers=IQPLUS_HEADERS, timeout=IQPLUS_TIMEOUT)
+        if resp.status_code != 200:
+            return {}
+        # IQPlus returns newest at end; search reversed to find target date immediately
+        for row in reversed(resp.json()):
+            t = row.get("time")
+            if t == target_date_str:
+                return {
+                    c: int(round(float(row[c])))
+                    for c in OHL_COLS
+                    if row.get(c) is not None and row[c] > 0
+                }
+            if t < target_date_str:
+                break
+    except Exception as e:
+        print(f"⚠️ iqplus lookup failed for {symbol}: {e}")
+    return {}
+
+
+def fill_ohl_fallbacks(df, date):
+    """Fallback 2: IQPlus. Fallback 3: Yahoo Finance.
+    Open/High/Low only. Close & Volume stay untouched from IDX.
+    Columns filled independently only where still 0."""
+    target_date_str = pd.Timestamp(date).strftime("%Y-%m-%d")
+
+    # --- Fallback 2: IQPlus ---
+    needs = df[OHL_COLS].eq(0).any(axis=1)
     missing = df.loc[needs, 'symbol'].unique().tolist()
-    if not missing:
+    if missing:
+        with requests.Session() as s:
+            iq_fetched = {sym: _fetch_iqplus_ohl(sym, target_date_str, session=s) for sym in missing}
+        for col in OHL_COLS:
+            was_zero = df[col] == 0
+            if not was_zero.any():
+                continue
+            fill = df['symbol'].map({s: v[col] for s, v in iq_fetched.items() if col in v})
+            target = was_zero & fill.notna()
+            if target.any():
+                df.loc[target, col] = fill[target].astype(int)
+                print(f"🟡 {col}==0 filled {int(target.sum())} from IQPlus")
+                logging.info(f"{col}==0 filled {int(target.sum())} from IQPlus")
+
+    # --- Fallback 3: Yahoo Finance ---
+    needs_yf = df[OHL_COLS].eq(0).any(axis=1)
+    missing_yf = df.loc[needs_yf, 'symbol'].unique().tolist()
+    if not missing_yf:
         return df
 
     start_date = pd.Timestamp(date).normalize()
-    end_date = start_date + timedelta(days=1)   # yfinance end is exclusive
+    end_date = start_date + timedelta(days=1)
 
-    fetched = {}
-    for i in missing:
+    yf_fetched = {}
+    for i in missing_yf:
         try:
             ticker = yf.Ticker(i)
-            # auto_adjust=False keeps the raw traded price, matching IDX
             a = ticker.history(start=start_date, end=end_date, auto_adjust=False)
             if a.empty:
                 continue
             a = a.reset_index()[["Date"] + list(YF_FILL_COLS.values())]
-            a = a[a["Date"].dt.strftime("%Y-%m-%d") == start_date.strftime("%Y-%m-%d")]
+            a = a[a["Date"].dt.strftime("%Y-%m-%d") == target_date_str]
             if a.empty:
                 continue
             row = a.iloc[0]
-            fetched[i] = {
+            yf_fetched[i] = {
                 col: int(round(float(row[yf_col])))
                 for col, yf_col in YF_FILL_COLS.items()
                 if pd.notna(row[yf_col]) and row[yf_col] > 0
@@ -68,18 +113,16 @@ def fill_ohl_from_yfinance(df, date):
         except Exception as e:
             print(f"⚠️ yfinance lookup failed for {i}: {e}")
 
-    for col in YF_FILL_COLS:
+    for col in OHL_COLS:
         was_zero = df[col] == 0
         if not was_zero.any():
             continue
-        fill = df['symbol'].map({s: v[col] for s, v in fetched.items() if col in v})
-        # only rows that are still 0 and got a real number back
+        fill = df['symbol'].map({s: v[col] for s, v in yf_fetched.items() if col in v})
         target = was_zero & fill.notna()
-        df.loc[target, col] = fill[target].astype(int)
-
-        print(f"🟡 {col}==0 for {int(was_zero.sum())} rows, filled {int(target.sum())} "
-              f"from yfinance, {int(was_zero.sum() - target.sum())} left at 0")
-        logging.info(f"{col}==0 for {int(was_zero.sum())} rows, filled {int(target.sum())} from yfinance")
+        if target.any():
+            df.loc[target, col] = fill[target].astype(int)
+            print(f"🟡 {col}==0 filled {int(target.sum())} from yfinance, {int(was_zero.sum() - target.sum())} left at 0")
+            logging.info(f"{col}==0 filled {int(target.sum())} from yfinance")
 
     return df
 
@@ -142,7 +185,7 @@ def get_daily_data(date=None):
 
     full_df["updated_on"] = pd.Timestamp.now(tz="GMT").strftime("%Y-%m-%d %H:%M:%S")
 
-    full_df = fill_ohl_from_yfinance(full_df, end)
+    full_df = fill_ohl_fallbacks(full_df, end)
 
     full_df = full_df[['date','symbol','close','volume','market_cap','foreign_sell_volume','foreign_buy_volume','open','high','low','value','mcap_method','updated_on']]
 
@@ -150,26 +193,27 @@ def get_daily_data(date=None):
 
     return full_df
 
-run_date = sys.argv[1] if len(sys.argv) > 1 else None
+if __name__ == "__main__":
+    run_date = sys.argv[1] if len(sys.argv) > 1 else None
 
-upload_data = get_daily_data(run_date)
-upload_data['updated_on'] = upload_data['updated_on'].astype(str)
-upload_data['date'] = upload_data['date'].astype(str)
+    upload_data = get_daily_data(run_date)
+    upload_data['updated_on'] = upload_data['updated_on'].astype(str)
+    upload_data['date'] = upload_data['date'].astype(str)
 
-active_company = supabase.table("idx_active_company_profile").select("symbol").execute()
-active_company = pd.DataFrame(active_company.data)
+    active_company = supabase.table("idx_active_company_profile").select("symbol").execute()
+    active_company = pd.DataFrame(active_company.data)
 
-upload_data = upload_data[upload_data.symbol.isin(active_company.symbol.unique())]
+    upload_data = upload_data[upload_data.symbol.isin(active_company.symbol.unique())]
 
-records = upload_data.to_dict(orient='records')
+    records = upload_data.to_dict(orient='records')
 
-initiate_logging(LOG_FILENAME)
+    initiate_logging(LOG_FILENAME)
 
-try:
-    supabase.table('idx_daily_data').upsert(records).execute()
-    logging.info(f'🟢 Finish upserting data for {datetime.today()}, with {upload_data.shape[0]} companies appended')
-    print(f'🟢 Finish upserting data for {datetime.today()}, with {upload_data.shape[0]} companies appended')
-except:
-    logging.info('🔴 Failed upserting data for {datetime.today()')
-    print('🔴 Failed upserting data for {datetime.today()')
-    sys.exit(1)
+    try:
+        supabase.table('idx_daily_data').upsert(records).execute()
+        logging.info(f'🟢 Finish upserting data for {datetime.today()}, with {upload_data.shape[0]} companies appended')
+        print(f'🟢 Finish upserting data for {datetime.today()}, with {upload_data.shape[0]} companies appended')
+    except:
+        logging.info('🔴 Failed upserting data for {datetime.today()}')
+        print('🔴 Failed upserting data for {datetime.today()}')
+        sys.exit(1)
