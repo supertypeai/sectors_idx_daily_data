@@ -61,10 +61,17 @@ def _fetch_iqplus_ohl(symbol: str, target_date_str: str, session: requests.Sessi
     return {}
 
 
+def is_candle_valid(open_p, high_p, low_p, close_p) -> bool:
+    """Validate candlestick geometry: Low <= Open <= High, Low <= Close <= High, Low <= High."""
+    if open_p <= 0 or high_p <= 0 or low_p <= 0 or close_p <= 0:
+        return False
+    return (low_p <= open_p <= high_p) and (low_p <= close_p <= high_p) and (low_p <= high_p)
+
+
 def fill_ohl_fallbacks(df, date):
     """Fallback 2: IQPlus. Fallback 3: Yahoo Finance.
     Open/High/Low only. Close & Volume stay untouched from IDX.
-    Columns filled independently only where still 0."""
+    Columns filled independently only where still 0, guarded by is_candle_valid."""
     target_date_str = pd.Timestamp(date).strftime("%Y-%m-%d")
 
     # --- Fallback 2: IQPlus ---
@@ -73,16 +80,23 @@ def fill_ohl_fallbacks(df, date):
     if missing:
         with requests.Session() as s:
             iq_fetched = {sym: _fetch_iqplus_ohl(sym, target_date_str, session=s) for sym in missing}
-        for col in OHL_COLS:
-            was_zero = df[col] == 0
-            if not was_zero.any():
+
+        for idx, row in df[needs].iterrows():
+            sym = row['symbol']
+            iq = iq_fetched.get(sym, {})
+            if not iq:
                 continue
-            fill = df['symbol'].map({s: v[col] for s, v in iq_fetched.items() if col in v})
-            target = was_zero & fill.notna()
-            if target.any():
-                df.loc[target, col] = fill[target].astype(int)
-                print(f"🟡 {col}==0 filled {int(target.sum())} from IQPlus")
-                logging.info(f"{col}==0 filled {int(target.sum())} from IQPlus")
+            cand_o = row['open'] if row['open'] > 0 else iq.get('open', 0)
+            cand_h = row['high'] if row['high'] > 0 else iq.get('high', 0)
+            cand_l = row['low'] if row['low'] > 0 else iq.get('low', 0)
+            c = row['close']
+
+            if is_candle_valid(cand_o, cand_h, cand_l, c):
+                for col, val in [('open', cand_o), ('high', cand_h), ('low', cand_l)]:
+                    if row[col] == 0 and val > 0:
+                        df.at[idx, col] = int(val)
+                        print(f"🟡 {sym} {col} filled from IQPlus: {val}")
+                        logging.info(f"{sym} {col} filled from IQPlus: {val}")
 
     # --- Fallback 3: Yahoo Finance ---
     needs_yf = df[OHL_COLS].eq(0).any(axis=1)
@@ -104,25 +118,35 @@ def fill_ohl_fallbacks(df, date):
             a = a[a["Date"].dt.strftime("%Y-%m-%d") == target_date_str]
             if a.empty:
                 continue
-            row = a.iloc[0]
+            row_data = a.iloc[0]
             yf_fetched[i] = {
-                col: int(round(float(row[yf_col])))
+                col: int(round(float(row_data[yf_col])))
                 for col, yf_col in YF_FILL_COLS.items()
-                if pd.notna(row[yf_col]) and row[yf_col] > 0
+                if pd.notna(row_data[yf_col]) and row_data[yf_col] > 0
             }
         except Exception as e:
             print(f"⚠️ yfinance lookup failed for {i}: {e}")
 
-    for col in OHL_COLS:
-        was_zero = df[col] == 0
-        if not was_zero.any():
+    for idx, row in df[needs_yf].iterrows():
+        sym = row['symbol']
+        yf_vals = yf_fetched.get(sym, {})
+        if not yf_vals:
             continue
-        fill = df['symbol'].map({s: v[col] for s, v in yf_fetched.items() if col in v})
-        target = was_zero & fill.notna()
-        if target.any():
-            df.loc[target, col] = fill[target].astype(int)
-            print(f"🟡 {col}==0 filled {int(target.sum())} from yfinance, {int(was_zero.sum() - target.sum())} left at 0")
-            logging.info(f"{col}==0 filled {int(target.sum())} from yfinance")
+        cand_o = row['open'] if row['open'] > 0 else yf_vals.get('open', 0)
+        cand_h = row['high'] if row['high'] > 0 else yf_vals.get('high', 0)
+        cand_l = row['low'] if row['low'] > 0 else yf_vals.get('low', 0)
+        c = row['close']
+
+        # Enforce candle integrity to reject split-adjusted scale mismatches
+        if is_candle_valid(cand_o, cand_h, cand_l, c):
+            for col, val in [('open', cand_o), ('high', cand_h), ('low', cand_l)]:
+                if row[col] == 0 and val > 0:
+                    df.at[idx, col] = int(val)
+                    print(f"🟡 {sym} {col} filled from yfinance: {val}")
+                    logging.info(f"{sym} {col} filled from yfinance: {val}")
+        else:
+            print(f"⚠️ {sym} rejected yfinance candidate: candle geometry invalid against IDX close ({cand_o}/{cand_h}/{cand_l} vs {c})")
+            logging.warning(f"{sym} rejected yfinance candidate: candle geometry invalid against IDX close")
 
     return df
 
