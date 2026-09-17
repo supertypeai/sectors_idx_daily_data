@@ -1,12 +1,11 @@
 import requests
 import pandas as pd
-import yfinance as yf
 import urllib.request
 import os
 import random
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from supabase import create_client
 from dotenv import load_dotenv
 from imp import reload
@@ -30,7 +29,6 @@ key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key)
 
 OHL_COLS = ["open", "high", "low"]
-YF_FILL_COLS = {"open": "Open", "high": "High", "low": "Low"}
 
 
 IQPLUS_TIMEOUT = 20
@@ -69,12 +67,11 @@ def is_candle_valid(open_p, high_p, low_p, close_p) -> bool:
 
 
 def fill_ohl_fallbacks(df, date):
-    """Fallback 2: IQPlus. Fallback 3: Yahoo Finance.
-    Open/High/Low only. Close & Volume stay untouched from IDX.
+    """IQPlus-only fallback for Open/High/Low. Close & Volume stay untouched from IDX.
     Columns filled independently only where still 0, guarded by is_candle_valid."""
     target_date_str = pd.Timestamp(date).strftime("%Y-%m-%d")
 
-    # --- Fallback 2: IQPlus ---
+    # --- IQPlus ---
     needs = df[OHL_COLS].eq(0).any(axis=1)
     missing = df.loc[needs, 'symbol'].unique().tolist()
     if missing:
@@ -97,56 +94,6 @@ def fill_ohl_fallbacks(df, date):
                         df.at[idx, col] = int(val)
                         print(f"🟡 {sym} {col} filled from IQPlus: {val}")
                         logging.info(f"{sym} {col} filled from IQPlus: {val}")
-
-    # --- Fallback 3: Yahoo Finance ---
-    needs_yf = df[OHL_COLS].eq(0).any(axis=1)
-    missing_yf = df.loc[needs_yf, 'symbol'].unique().tolist()
-    if not missing_yf:
-        return df
-
-    start_date = pd.Timestamp(date).normalize()
-    end_date = start_date + timedelta(days=1)
-
-    yf_fetched = {}
-    for i in missing_yf:
-        try:
-            ticker = yf.Ticker(i)
-            a = ticker.history(start=start_date, end=end_date, auto_adjust=False)
-            if a.empty:
-                continue
-            a = a.reset_index()[["Date"] + list(YF_FILL_COLS.values())]
-            a = a[a["Date"].dt.strftime("%Y-%m-%d") == target_date_str]
-            if a.empty:
-                continue
-            row_data = a.iloc[0]
-            yf_fetched[i] = {
-                col: int(round(float(row_data[yf_col])))
-                for col, yf_col in YF_FILL_COLS.items()
-                if pd.notna(row_data[yf_col]) and row_data[yf_col] > 0
-            }
-        except Exception as e:
-            print(f"⚠️ yfinance lookup failed for {i}: {e}")
-
-    for idx, row in df[needs_yf].iterrows():
-        sym = row['symbol']
-        yf_vals = yf_fetched.get(sym, {})
-        if not yf_vals:
-            continue
-        cand_o = row['open'] if row['open'] > 0 else yf_vals.get('open', 0)
-        cand_h = row['high'] if row['high'] > 0 else yf_vals.get('high', 0)
-        cand_l = row['low'] if row['low'] > 0 else yf_vals.get('low', 0)
-        c = row['close']
-
-        # Enforce candle integrity to reject split-adjusted scale mismatches
-        if is_candle_valid(cand_o, cand_h, cand_l, c):
-            for col, val in [('open', cand_o), ('high', cand_h), ('low', cand_l)]:
-                if row[col] == 0 and val > 0:
-                    df.at[idx, col] = int(val)
-                    print(f"🟡 {sym} {col} filled from yfinance: {val}")
-                    logging.info(f"{sym} {col} filled from yfinance: {val}")
-        else:
-            print(f"⚠️ {sym} rejected yfinance candidate: candle geometry invalid against IDX close ({cand_o}/{cand_h}/{cand_l} vs {c})")
-            logging.warning(f"{sym} rejected yfinance candidate: candle geometry invalid against IDX close")
 
     return df
 
