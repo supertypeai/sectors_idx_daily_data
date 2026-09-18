@@ -2,10 +2,21 @@
 name: Daily Data Scraper
 
 on:
-  # Scheduled trigger lives in cron-job.org (calls workflow_dispatch via GitHub REST API).
+  # Primary trigger lives in cron-job.org (calls workflow_dispatch via GitHub REST API).
   # GH Actions cron suffered 3-5h queue drift on the 11:00 UTC slot; cron-job.org
   # gives sub-minute precision so the scrape lands at 18:00 WIB sharp.
   workflow_dispatch:
+    inputs:
+      date:
+        description: 'Optional target date (YYYY-MM-DD). Defaults to today (Asia/Jakarta).'
+        required: false
+  # 21:00 UTC = 04:00 WIB Tue-Sat -> re-upserts day-1, refills open==0 from the 18:00 run.
+  schedule:
+    - cron: '0 21 * * 1-5'
+
+concurrency:
+  group: daily-scraper
+  cancel-in-progress: false
       
 
 jobs:
@@ -26,12 +37,25 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
       
+    - name: Resolve target date
+      id: target
+      run: |
+        if [ "${{ github.event_name }}" = "schedule" ]; then
+          DATE=$(TZ=Asia/Jakarta date -d yesterday +%F)   # 04:00 WIB -> day-1
+        elif [ -n "${{ inputs.date }}" ]; then
+          DATE="${{ inputs.date }}"
+        else
+          DATE=$(TZ=Asia/Jakarta date +%F)                # 18:00 WIB -> today
+        fi
+        echo "run_date=$DATE" >> "$GITHUB_OUTPUT"
+        echo "Target date: $DATE"
+
     - name: Run Daily Data Scraper
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         PROXY_URL: ${{ secrets.PROXY_URL }}
-      run: python idx_daily_updater.py
+      run: python idx_daily_updater.py "${{ steps.target.outputs.run_date }}"
    
     - name: commit files
       run: |
