@@ -10,7 +10,7 @@ on:
       date:
         description: 'Optional target date (YYYY-MM-DD). Defaults to today (Asia/Jakarta).'
         required: false
-  # 21:00 UTC = 04:00 WIB Tue-Sat -> re-upserts day-1, refills open==0 from the 18:00 run.
+  # 21:00 UTC = 04:00 WIB Tue-Sat -> IQPlus-only repair of day-1 (and the trading day before it).
   schedule:
     - cron: '0 21 * * 1-5'
 
@@ -50,12 +50,24 @@ jobs:
         echo "run_date=$DATE" >> "$GITHUB_OUTPUT"
         echo "Target date: $DATE"
 
+    # workflow_dispatch -> IDX scrape only. schedule -> IQPlus repair only.
     - name: Run Daily Data Scraper
+      if: github.event_name == 'workflow_dispatch'
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         PROXY_URL: ${{ secrets.PROXY_URL }}
       run: python idx_daily_updater.py "${{ steps.target.outputs.run_date }}"
+
+    # Fills open/high/low left at 0 by IDX. Scrape-free, parallel, writes with the service key.
+    # --with-prev also repairs the previous TRADING day (resolved from the DB, not calendar).
+    - name: IQPlus repair (open/high/low)
+      if: github.event_name == 'schedule'
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      run: python iqplus_repair.py "${{ steps.target.outputs.run_date }}" --with-prev --apply
    
     - name: commit files
       run: |

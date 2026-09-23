@@ -28,76 +28,6 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key)
 
-OHL_COLS = ["open", "high", "low"]
-
-
-IQPLUS_TIMEOUT = 20
-IQPLUS_HEADERS = {"User-Agent": "Mozilla/5.0"}
-
-
-def _fetch_iqplus_ohl(symbol: str, target_date_str: str, session: requests.Session = None) -> dict:
-    code = symbol.replace(".JK", "").upper()
-    url = f"https://www.iqplus.info/api/v1/ohlcv.php?code={code}"
-    http = session or requests
-    try:
-        resp = http.get(url, headers=IQPLUS_HEADERS, timeout=IQPLUS_TIMEOUT)
-        if resp.status_code != 200:
-            return {}
-        # IQPlus returns newest at end; search reversed to find target date immediately
-        for row in reversed(resp.json()):
-            t = row.get("time")
-            if t == target_date_str:
-                return {
-                    c: int(round(float(row[c])))
-                    for c in OHL_COLS
-                    if row.get(c) is not None and row[c] > 0
-                }
-            if t < target_date_str:
-                break
-    except Exception as e:
-        print(f"⚠️ iqplus lookup failed for {symbol}: {e}")
-    return {}
-
-
-def is_candle_valid(open_p, high_p, low_p, close_p) -> bool:
-    """Validate candlestick geometry: Low <= Open <= High, Low <= Close <= High, Low <= High."""
-    if open_p <= 0 or high_p <= 0 or low_p <= 0 or close_p <= 0:
-        return False
-    return (low_p <= open_p <= high_p) and (low_p <= close_p <= high_p) and (low_p <= high_p)
-
-
-def fill_ohl_fallbacks(df, date):
-    """IQPlus-only fallback for Open/High/Low. Close & Volume stay untouched from IDX.
-    Columns filled independently only where still 0, guarded by is_candle_valid."""
-    target_date_str = pd.Timestamp(date).strftime("%Y-%m-%d")
-
-    # --- IQPlus ---
-    needs = df[OHL_COLS].eq(0).any(axis=1)
-    missing = df.loc[needs, 'symbol'].unique().tolist()
-    if missing:
-        with requests.Session() as s:
-            iq_fetched = {sym: _fetch_iqplus_ohl(sym, target_date_str, session=s) for sym in missing}
-
-        for idx, row in df[needs].iterrows():
-            sym = row['symbol']
-            iq = iq_fetched.get(sym, {})
-            if not iq:
-                continue
-            cand_o = row['open'] if row['open'] > 0 else iq.get('open', 0)
-            cand_h = row['high'] if row['high'] > 0 else iq.get('high', 0)
-            cand_l = row['low'] if row['low'] > 0 else iq.get('low', 0)
-            c = row['close']
-
-            if is_candle_valid(cand_o, cand_h, cand_l, c):
-                for col, val in [('open', cand_o), ('high', cand_h), ('low', cand_l)]:
-                    if row[col] == 0 and val > 0:
-                        df.at[idx, col] = int(val)
-                        print(f"🟡 {sym} {col} filled from IQPlus: {val}")
-                        logging.info(f"{sym} {col} filled from IQPlus: {val}")
-
-    return df
-
-
 def get_daily_data(date=None):
 
     # optional CLI date lets a missed day be re-run; defaults to today
@@ -156,8 +86,7 @@ def get_daily_data(date=None):
 
     full_df["updated_on"] = pd.Timestamp.now(tz="GMT").strftime("%Y-%m-%d %H:%M:%S")
 
-    full_df = fill_ohl_fallbacks(full_df, end)
-
+    # open/high/low stay as scraped (0 when IDX omits them); iqplus_repair.py fills them.
     full_df = full_df[['date','symbol','close','volume','market_cap','foreign_sell_volume','foreign_buy_volume','open','high','low','value','mcap_method','updated_on']]
 
     full_df['date'] = pd.to_datetime(full_df['date'])
