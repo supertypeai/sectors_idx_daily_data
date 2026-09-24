@@ -6,8 +6,8 @@ stays in idx_daily_updater; all IQPlus + candle logic lives here.
 Each symbol is fetched from IQPlus exactly once, regardless of how many dates
 are requested (one response carries the full history).
 
-Read-only by default. Writes only with --apply, which needs the service key
-(the anon key is silently dropped by RLS).
+Read-only by default. Writes only with --apply, which needs SUPABASE_KEY set to
+the service key (the anon/publishable key is silently dropped by RLS).
 
 Usage:
   iqplus_repair.py YYYY-MM-DD [YYYY-MM-DD ...] [--workers N] [--with-prev] [--apply]
@@ -76,20 +76,6 @@ def _fetch_iqplus_rows(symbol: str, session: requests.Session = None) -> list:
 
 # ── Entry point ──────────────────────────────────────────────────────────────
 
-def _service_key():
-    k = os.environ.get('SUPABASE_SERVICE_KEY')
-    if k:
-        return k
-    try:
-        with open('.env') as f:
-            for line in f:
-                if 'sb_secret_' in line:
-                    return line.split('=', 1)[1].strip().strip('"\'')
-    except FileNotFoundError:
-        pass
-    raise SystemExit('--apply needs SUPABASE_SERVICE_KEY (anon key is RLS-blocked)')
-
-
 def main():
     argv = sys.argv[1:]
     workers = 10
@@ -110,10 +96,8 @@ def main():
         except ValueError:
             raise SystemExit(f'invalid date {d!r}, expected YYYY-MM-DD')
 
-    sb = create_client(
-        os.environ['SUPABASE_URL'],
-        _service_key() if apply_ else os.environ['SUPABASE_KEY'],
-    )
+    # SUPABASE_KEY must be the service key: --apply writes are dropped by RLS otherwise.
+    sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_KEY'])
     session = requests.Session()
     session.headers.update(IQPLUS_HEADERS)
 
