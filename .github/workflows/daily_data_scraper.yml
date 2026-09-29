@@ -50,9 +50,24 @@ jobs:
         echo "run_date=$DATE" >> "$GITHUB_OUTPUT"
         echo "Target date: $DATE"
 
-    # workflow_dispatch -> IDX scrape only. schedule -> IQPlus repair only.
+    # Re-scrape day-1 only when the 18:00 run left it missing; otherwise repair alone.
+    - name: Check if target date is missing
+      id: check
+      if: github.event_name == 'schedule'
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      run: |
+        COUNT=$(curl -s "$SUPABASE_URL/rest/v1/idx_daily_data?date=eq.${{ steps.target.outputs.run_date }}&select=symbol" \
+          -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" \
+          -H "Prefer: count=exact" -H "Range: 0-0" -o /dev/null -D - | grep -i content-range | sed 's#.*/##' | tr -d '\r')
+        # non-numeric COUNT (curl/HTTP error) -> assume missing so the safety net still fires
+        if [[ "$COUNT" =~ ^[1-9][0-9]*$ ]]; then MISSING=false; else MISSING=true; fi
+        echo "${{ steps.target.outputs.run_date }} rows=$COUNT missing=$MISSING"
+        echo "missing=$MISSING" >> "$GITHUB_OUTPUT"
+
     - name: Run Daily Data Scraper
-      if: github.event_name == 'workflow_dispatch'
+      if: github.event_name == 'workflow_dispatch' || steps.check.outputs.missing == 'true'
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}

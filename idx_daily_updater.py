@@ -1,4 +1,6 @@
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import pandas as pd
 import urllib.request
 import os
@@ -51,20 +53,29 @@ def get_daily_data(date=None):
         "http": PROXY_URL,
         "https": PROXY_URL,
     }
-    
-    response = requests.get(
+
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(max_retries=Retry(
+        total=3, connect=3, read=3, backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["GET"],
+    )))
+
+    response = session.get(
         url,
         headers=headers,
         proxies=PROXIES,
-        verify=False   # disables SSL cert check
+        verify=False,      # disables SSL cert check
+        timeout=(10, 30),  # (connect, read)
     )
+    response.raise_for_status()
 
-    try:
-        full_df = pd.DataFrame(response.json()['data'])
-        # full_df = pd.concat([full_df, test], ignore_index=True)
-        print(f"🟢Finish for date: {end}")
-    except:
-        print(f"🔴error for date {end}")
+    payload = response.json()
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not data:
+        raise ValueError(f"IDX returned no 'data' for {end} (HTTP {response.status_code})")
+
+    full_df = pd.DataFrame(data)
+    print(f"🟢Finish for date: {end}")
 
     full_df = full_df[['Date','StockCode','Close','ListedShares','Volume','ForeignSell','ForeignBuy','OpenPrice','High','Low','Value']].drop_duplicates()
     full_df['StockCode'] = full_df['StockCode']+".JK"
@@ -94,9 +105,17 @@ def get_daily_data(date=None):
     return full_df
 
 if __name__ == "__main__":
+    initiate_logging(LOG_FILENAME)
+
     run_date = sys.argv[1] if len(sys.argv) > 1 else None
 
-    upload_data = get_daily_data(run_date)
+    try:
+        upload_data = get_daily_data(run_date)
+    except Exception as e:
+        logging.error(f'🔴 Failed scraping IDX for {run_date or datetime.today().date()}: {e}')
+        print(f'🔴 Failed scraping IDX for {run_date or datetime.today().date()}: {e}')
+        sys.exit(1)
+
     upload_data['updated_on'] = upload_data['updated_on'].astype(str)
     upload_data['date'] = upload_data['date'].astype(str)
 
@@ -107,13 +126,11 @@ if __name__ == "__main__":
 
     records = upload_data.to_dict(orient='records')
 
-    initiate_logging(LOG_FILENAME)
-
     try:
         supabase.table('idx_daily_data').upsert(records).execute()
         logging.info(f'🟢 Finish upserting data for {datetime.today()}, with {upload_data.shape[0]} companies appended')
         print(f'🟢 Finish upserting data for {datetime.today()}, with {upload_data.shape[0]} companies appended')
-    except:
-        logging.info('🔴 Failed upserting data for {datetime.today()}')
-        print('🔴 Failed upserting data for {datetime.today()}')
+    except Exception as e:
+        logging.error(f'🔴 Failed upserting data for {datetime.today()}: {e}')
+        print(f'🔴 Failed upserting data for {datetime.today()}: {e}')
         sys.exit(1)
