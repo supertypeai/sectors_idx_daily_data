@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 from supabase import create_client
 from dotenv import load_dotenv
-from imp import reload
+from importlib import reload
 import sys
 
 import logging
