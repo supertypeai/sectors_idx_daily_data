@@ -10,9 +10,12 @@ on:
       date:
         description: 'Optional target date (YYYY-MM-DD). Defaults to today (Asia/Jakarta).'
         required: false
-  # 21:00 UTC = 04:00 WIB Tue-Sat -> IQPlus-only repair of day-1 (and the trading day before it).
+  # 18:00 UTC = 01:00 WIB Tue-Sat. GH queue drift on this slot runs 3-6h, so it lands
+  # ~04:00-06:42 WIB; the target is still "yesterday in Asia/Jakarta" (day-1 in WIB),
+  # which is the trading day that just closed. A run with zero drift at 01:00 WIB is
+  # also fine: IDX publishes the day-1 summary after the ~16:00 WIB close.
   schedule:
-    - cron: '0 21 * * 1-5'
+    - cron: '0 18 * * 1-5'
 
 concurrency:
   group: daily-scraper
@@ -50,7 +53,7 @@ jobs:
         echo "run_date=$DATE" >> "$GITHUB_OUTPUT"
         echo "Target date: $DATE"
 
-    # Re-scrape day-1 only when the 18:00 run left it missing; otherwise repair alone.
+    # Re-scrape day-1 only when the 18:00 run left it missing or incomplete; otherwise repair alone.
     - name: Check if target date is missing
       id: check
       if: github.event_name == 'schedule'
@@ -58,12 +61,37 @@ jobs:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       run: |
-        COUNT=$(curl -s "$SUPABASE_URL/rest/v1/idx_daily_data?date=eq.${{ steps.target.outputs.run_date }}&select=symbol" \
-          -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" \
-          -H "Prefer: count=exact" -H "Range: 0-0" -o /dev/null -D - | grep -i content-range | sed 's#.*/##' | tr -d '\r')
+        BASE="$SUPABASE_URL/rest/v1/idx_daily_data"
+        AUTH=(-H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY")
+        count_for() {
+          curl -s "$BASE?date=eq.$1&select=symbol" "${AUTH[@]}" \
+            -H "Prefer: count=exact" -H "Range: 0-0" -o /dev/null -D - \
+            | grep -i content-range | sed 's#.*/##' | tr -d '\r' || true
+        }
+
+        TARGET="${{ steps.target.outputs.run_date }}"
+        COUNT=$(count_for "$TARGET")
+
+        # Expected size = the previous trading day with rows, so a partial write is visible
+        PREV=$(curl -s "$BASE?date=lt.$TARGET&select=date&order=date.desc&limit=1" "${AUTH[@]}" \
+          | grep -o '"date":"[0-9-]*"' | head -1 | cut -d'"' -f4 || true)
+        EXPECTED=0
+        if [ -n "$PREV" ]; then
+          PREV_COUNT=$(count_for "$PREV")
+          if [[ "$PREV_COUNT" =~ ^[0-9]+$ ]]; then EXPECTED=$PREV_COUNT; fi
+        fi
+
         # non-numeric COUNT (curl/HTTP error) -> assume missing so the safety net still fires
-        if [[ "$COUNT" =~ ^[1-9][0-9]*$ ]]; then MISSING=false; else MISSING=true; fi
-        echo "${{ steps.target.outputs.run_date }} rows=$COUNT missing=$MISSING"
+        if ! [[ "$COUNT" =~ ^[0-9]+$ ]]; then
+          MISSING=true
+        elif [ "$EXPECTED" -eq 0 ]; then
+          MISSING=$([ "$COUNT" -gt 0 ] && echo false || echo true)   # nothing to compare against yet
+        elif [ "$COUNT" -lt "$EXPECTED" ]; then
+          MISSING=true   # empty or partial day (harvest stopped before the full universe)
+        else
+          MISSING=false
+        fi
+        echo "$TARGET rows=$COUNT expected=$EXPECTED (from $PREV) missing=$MISSING"
         echo "missing=$MISSING" >> "$GITHUB_OUTPUT"
 
     - name: Run Daily Data Scraper
