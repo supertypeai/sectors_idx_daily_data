@@ -95,17 +95,26 @@ jobs:
         echo "missing=$MISSING" >> "$GITHUB_OUTPUT"
 
     - name: Run Daily Data Scraper
+      id: scrape
       if: github.event_name == 'workflow_dispatch' || steps.check.outputs.missing == 'true'
+      continue-on-error: true
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         PROXY_URL: ${{ secrets.PROXY_URL }}
       run: python idx_daily_updater.py "${{ steps.target.outputs.run_date }}"
 
+    - name: IQPlus fallback (OHLCV)
+      if: steps.scrape.outcome == 'failure'
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      run: python iqplus_repair.py "${{ steps.target.outputs.run_date }}" --fill-missing --apply
+
     # Fills open/high/low left at 0 by IDX. Scrape-free, parallel, writes with the service key.
     # --with-prev also repairs the previous TRADING day (resolved from the DB, not calendar).
     - name: IQPlus repair (open/high/low)
-      if: github.event_name == 'schedule'
+      if: ${{ !cancelled() }}
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}

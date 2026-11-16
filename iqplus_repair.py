@@ -10,7 +10,7 @@ Read-only by default. Writes only with --apply, which needs SUPABASE_KEY set to
 the service key (the anon/publishable key is silently dropped by RLS).
 
 Usage:
-  iqplus_repair.py YYYY-MM-DD [YYYY-MM-DD ...] [--workers N] [--with-prev] [--apply]
+  iqplus_repair.py YYYY-MM-DD [YYYY-MM-DD ...] [--workers N] [--with-prev] [--fill-missing] [--apply]
 """
 import os
 import sys
@@ -87,6 +87,7 @@ def main():
         del argv[_i:_i + 2]
     apply_  = '--apply'     in argv
     with_prev = '--with-prev' in argv
+    fill_missing = '--fill-missing' in argv
     dates = list(dict.fromkeys(a for a in argv if not a.startswith('--')))
     if not dates:
         raise SystemExit('usage: iqplus_repair.py YYYY-MM-DD [...] [--workers N] [--with-prev] [--apply]')
@@ -109,7 +110,13 @@ def main():
             print(f'anchor={dates[0]}  prev trading day={dates[-1]}', flush=True)
 
     # ── read all target dates ────────────────────────────────────────────────
+    universe = []
+    if fill_missing:
+        universe = sorted({r['symbol'] for r in
+                           sb.table('idx_active_company_profile').select('symbol').execute().data})
+
     need = defaultdict(list)
+    missing_dates = set()
     for date in dates:
         db, off = [], 0
         while True:
@@ -121,8 +128,16 @@ def main():
             if len(b) < 1000:
                 break
             off += 1000
-        need[date] = [r for r in db if min(r['open'] or 0, r['high'] or 0, r['low'] or 0) <= 0]
+
+        if not db and fill_missing:
+            missing_dates.add(date)
+            need[date] = [{'symbol': s, 'open': 0, 'high': 0, 'low': 0, 'close': 0}
+                          for s in universe]
+        else:
+            need[date] = [r for r in db if min(r['open'] or 0, r['high'] or 0, r['low'] or 0) <= 0]
+
         print(f'[{date}] rows={len(db)} needing_repair={len(need[date])} '
+              f'{"FILL MISSING" if date in missing_dates else ""} '
               f'mode={"APPLY" if apply_ else "DRY RUN"}', flush=True)
 
     # ── one IQPlus call per unique symbol ────────────────────────────────────
@@ -146,15 +161,19 @@ def main():
     total_fixed = total_stuck = 0
     for date in dates:
         d_fixed = d_stuck = 0
+        inserting = date in missing_dates
+        batch = []
         for i, r in enumerate(need[date], 1):
-            sym, c = r['symbol'], r['close'] or 0
+            sym = r['symbol']
             iq = _ohl_for_date(history.get(sym, []), date)
 
             if not iq:
                 d_stuck += 1
-                print(f'[{date}] [{i}/{len(need[date])}] {sym:12} no IQPlus data -> left blank', flush=True)
+                if not inserting:
+                    print(f'[{date}] [{i}/{len(need[date])}] {sym:12} no IQPlus data -> left blank', flush=True)
                 continue
 
+            c = iq.get('close', 0) if inserting else (r['close'] or 0)
             o = r['open'] if (r['open'] or 0) > 0 else iq.get('open', 0)
             h = r['high'] if (r['high'] or 0) > 0 else iq.get('high', 0)
             l = r['low']  if (r['low']  or 0) > 0 else iq.get('low',  0)
@@ -163,6 +182,13 @@ def main():
                 d_stuck += 1
                 print(f'[{date}] [{i}/{len(need[date])}] {sym:12} REJECT guard '
                       f'o={o} h={h} l={l} c={c}', flush=True)
+                continue
+
+            if inserting:
+                batch.append({'date': date, 'symbol': sym, 'close': int(c),
+                              'volume': int(iq.get('volume') or 0),
+                              'open': int(o), 'high': int(h), 'low': int(l)})
+                d_fixed += 1
                 continue
 
             if apply_:
@@ -179,6 +205,11 @@ def main():
             print(f'[{date}] [{i}/{len(need[date])}] {sym:12} '
                   f'open {r["open"]}->{o}  high {r["high"]}->{h}  low {r["low"]}->{l}  '
                   f'{"APPLIED" if apply_ else "dry"}', flush=True)
+
+        if inserting and batch and apply_:
+            for k in range(0, len(batch), 500):
+                sb.table('idx_daily_data').upsert(batch[k:k + 500]).execute()
+            print(f'[{date}] INSERTED {len(batch)} rows', flush=True)
 
         total_fixed += d_fixed
         total_stuck += d_stuck

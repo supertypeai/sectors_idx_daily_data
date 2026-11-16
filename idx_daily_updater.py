@@ -7,7 +7,8 @@ import os
 import random
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from supabase import create_client
 from dotenv import load_dotenv
 from importlib import reload
@@ -17,6 +18,7 @@ import logging
 
 LOG_FILENAME = 'daily_data_scrapper.log'
 IDX_HOME = 'https://www.idx.co.id/en/'
+REFRESH_DAYS = 2
 IDX_IMPERSONATE = 'chrome124'
 IDX_FINGERPRINT_ATTEMPTS = 3
 IDX_BACKOFF_SECONDS = 5
@@ -163,38 +165,112 @@ def get_daily_data(date=None):
 
     return full_df
 
-if __name__ == "__main__":
-    initiate_logging(LOG_FILENAME)
+def _weekdays_before(day, n):
+    out, cur = [], day
+    while len(out) < n:
+        cur -= timedelta(days=1)
+        if cur.weekday() < 5:
+            out.append(cur)
+    return out
 
-    run_date = sys.argv[1] if len(sys.argv) > 1 else None
 
-    try:
-        upload_data = get_daily_data(run_date)
-    except Exception as e:
-        logging.error(f'🔴 Failed scraping IDX for {run_date or datetime.today().date()}: {e}')
-        print(f'🔴 Failed scraping IDX for {run_date or datetime.today().date()}: {e}')
-        sys.exit(1)
+def _fetch_existing_ohl(dates):
+    wanted = [d.strftime('%Y-%m-%d') for d in dates]
+    rows = (supabase.table('idx_daily_data')
+            .select('symbol,date,open,high,low').in_('date', wanted).execute().data)
+    return pd.DataFrame(rows) if rows else None
 
+
+def _preserve_ohl(df, date_str, existing):
+    if existing is None or existing.empty:
+        return df, 0
+    today = existing[existing.date == date_str]
+    if today.empty:
+        return df, 0
+    keep = today.set_index('symbol')
+    filled = 0
+    for col in ('open', 'high', 'low'):
+        prev = df.symbol.map(keep[col]).fillna(0).astype('int64')
+        use_old = (df[col] == 0) & (prev > 0)
+        filled += int(use_old.sum())
+        df[col] = df[col].where(~use_old, prev)
+    return df, filled
+
+
+def scrape_date(date_str, existing):
+    upload_data = get_daily_data(date_str)
     if upload_data is None:
-        logging.info(f'⚪ No trading data for {run_date or datetime.today().date()}, nothing to upsert')
-        print(f'⚪ No trading data for {run_date or datetime.today().date()}, nothing to upsert')
-        sys.exit(0)
+        return None, 0
 
     upload_data['updated_on'] = upload_data['updated_on'].astype(str)
     upload_data['date'] = upload_data['date'].astype(str)
 
     active_company = supabase.table("idx_active_company_profile").select("symbol").execute()
-    active_company = pd.DataFrame(active_company.data)
+    active_syms = pd.DataFrame(active_company.data).symbol.unique()
+    upload_data = upload_data[upload_data.symbol.isin(active_syms)].copy()
 
-    upload_data = upload_data[upload_data.symbol.isin(active_company.symbol.unique())]
+    upload_data, preserved = _preserve_ohl(upload_data, date_str, existing)
+    return upload_data, preserved
 
-    records = upload_data.to_dict(orient='records')
 
-    try:
-        supabase.table('idx_daily_data').upsert(records).execute()
-        logging.info(f'🟢 Finish upserting data for {datetime.today()}, with {upload_data.shape[0]} companies appended')
-        print(f'🟢 Finish upserting data for {datetime.today()}, with {upload_data.shape[0]} companies appended')
-    except Exception as e:
-        logging.error(f'🔴 Failed upserting data for {datetime.today()}: {e}')
-        print(f'🔴 Failed upserting data for {datetime.today()}: {e}')
+if __name__ == "__main__":
+    initiate_logging(LOG_FILENAME)
+
+    argv = [a for a in sys.argv[1:] if not a.startswith('--')]
+    dry_run = '--dry-run' in sys.argv
+    run_date = argv[0] if argv else None
+
+    if run_date:
+        try:
+            target = datetime.strptime(run_date, '%Y-%m-%d').date()
+        except ValueError:
+            raise SystemExit(f'invalid date {run_date!r}, expected YYYY-MM-DD')
+    else:
+        target = datetime.now(ZoneInfo('Asia/Jakarta')).date()
+
+    dates = [target] + _weekdays_before(target, REFRESH_DAYS)
+    print(f'Dates: {" ".join(str(d) for d in dates)} (target + {REFRESH_DAYS} prior weekdays)')
+
+    existing = _fetch_existing_ohl(dates)
+
+    target_failed = False
+    for d in dates:
+        date_str = d.strftime('%Y-%m-%d')
+        is_target = d == target
+        try:
+            upload_data, preserved = scrape_date(date_str, existing)
+        except Exception as e:
+            msg = f'🔴 Failed scraping IDX for {date_str}: {e}'
+            print(msg)
+            logging.error(msg)
+            if is_target:
+                target_failed = True
+            continue
+
+        if upload_data is None:
+            msg = f'⚪ No trading data for {date_str}, nothing to upsert'
+            print(msg)
+            logging.info(msg)
+            continue
+
+        records = upload_data.to_dict(orient='records')
+        note = f' (ohl preserved={preserved})' if preserved else ''
+
+        if dry_run:
+            print(f'DRY RUN: would upsert {len(records)} rows for {date_str}{note}')
+            continue
+
+        try:
+            supabase.table('idx_daily_data').upsert(records).execute()
+            msg = f'🟢 Finish upserting data for {date_str}, with {len(records)} companies appended'
+            print(msg + note)
+            logging.info(msg)
+        except Exception as e:
+            msg = f'🔴 Failed upserting data for {date_str}: {e}'
+            print(msg)
+            logging.error(msg)
+            if is_target:
+                target_failed = True
+
+    if target_failed:
         sys.exit(1)
