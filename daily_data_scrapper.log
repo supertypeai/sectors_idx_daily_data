@@ -482,3 +482,7 @@
 2026-11-16 11:04:00,285 - ERROR: 🔴 Failed scraping IDX for 2026-11-16: IDX fetch failed after plain requests + 3 fingerprint attempts: Failed to perform, curl: (28) Operation timed out after 15002 milliseconds with 0 bytes received. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
 2026-11-16 11:07:07,414 - ERROR: 🔴 Failed scraping IDX for 2026-11-13: IDX fetch failed after plain requests + 3 fingerprint attempts: Failed to perform, curl: (28) Operation timed out after 15001 milliseconds with 0 bytes received. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
 2026-11-16 11:10:50,593 - ERROR: 🔴 Failed scraping IDX for 2026-11-12: IDX fetch failed after plain requests + 3 fingerprint attempts: Failed to perform, curl: (28) Operation timed out after 40002 milliseconds with 0 bytes received. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-11-17 01:50:24,698 - INFO: Daily data scrapper started
+2026-11-17 01:53:33,033 - ERROR: 🔴 Failed scraping IDX for 2026-11-16: IDX fetch failed after plain requests + 3 fingerprint attempts: Failed to perform, curl: (28) Operation timed out after 15000 milliseconds with 0 bytes received. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-11-17 01:55:44,879 - INFO: 🟢 Finish upserting data for 2026-11-13, with 944 companies appended
+2026-11-17 01:56:15,484 - INFO: 🟢 Finish upserting data for 2026-11-12, with 944 companies appended
