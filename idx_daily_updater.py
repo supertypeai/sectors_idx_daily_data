@@ -19,10 +19,12 @@ import logging
 LOG_FILENAME = 'daily_data_scrapper.log'
 IDX_HOME = 'https://www.idx.co.id/en/'
 REFRESH_DAYS = 2
-IDX_IMPERSONATE = 'chrome124'
-IDX_FINGERPRINT_ATTEMPTS = 3
+# Cloudflare accepts some TLS fingerprints and rejects the rest, and that set rotates
+# over days, so try a short ladder per round instead of pinning one.
+IDX_FINGERPRINTS = ['safari17_0', 'chrome124', 'chrome131']
+IDX_ROUNDS = 2
 IDX_BACKOFF_SECONDS = 5
-IDX_WARMUP_TIMEOUT = 15
+IDX_WARMUP_TIMEOUT = 5
 
 def initiate_logging(LOG_FILENAME):
     reload(logging)
@@ -60,7 +62,7 @@ def _fetch_plain(url, headers, proxies, timeout):
         session.close()   # the body is already buffered, so closing here is safe
 
 
-def _fetch_summary(url, headers, timeout=(10, 30), attempts=IDX_FINGERPRINT_ATTEMPTS):
+def _fetch_summary(url, headers, timeout=(10, 30), attempts=IDX_ROUNDS):
     """GET the IDX summary, plain requests first, browser fingerprint after.
 
     Cloudflare fingerprints plain urllib3, so that path only works when the proxy exit
@@ -87,22 +89,33 @@ def _fetch_summary(url, headers, timeout=(10, 30), attempts=IDX_FINGERPRINT_ATTE
     # The impersonated client sets its own User-Agent; keep our headers from overriding it
     fingerprint_headers = {k: v for k, v in headers.items() if k.lower() != "user-agent"}
 
-    for attempt in range(1, attempts + 1):
-        session = cffi_requests.Session(impersonate=IDX_IMPERSONATE, proxies=proxies, verify=False)
-        try:
-            session.get(IDX_HOME, timeout=min(timeout[1], IDX_WARMUP_TIMEOUT))   # seeds the Cloudflare cookies
-            response = session.get(url, headers=fingerprint_headers, timeout=timeout)
-            response.raise_for_status()
-            return response
-        except Exception as e:
-            last = e
-            print(f"⚠️ IDX fingerprint attempt {attempt}/{attempts} failed: {type(e).__name__}: {e}")
-            if attempt < attempts:
-                time.sleep(IDX_BACKOFF_SECONDS * attempt)
-        finally:
-            session.close()
+    warmup_notes = []
+    for round_no in range(1, attempts + 1):
+        for imp in IDX_FINGERPRINTS:
+            session = cffi_requests.Session(impersonate=imp, proxies=proxies, verify=False)
+            try:
+                # The warm-up only seeds Cloudflare cookies: a slow home page must not stop
+                # us from calling the API itself, which is the part that has to succeed.
+                try:
+                    session.get(IDX_HOME, timeout=IDX_WARMUP_TIMEOUT)
+                except Exception as warmup_error:
+                    warmup_notes.append(f"{imp}: {type(warmup_error).__name__}")
+                response = session.get(url, headers=fingerprint_headers, timeout=timeout)
+                response.raise_for_status()
+                return response
+            except Exception as e:
+                last = e
+                print(f"⚠️ IDX {imp} round {round_no}/{attempts} failed: {type(e).__name__}: {e}")
+            finally:
+                session.close()
+        if round_no < attempts:
+            time.sleep(IDX_BACKOFF_SECONDS * round_no)
 
-    raise RuntimeError(f"IDX fetch failed after plain requests + {attempts} fingerprint attempts: {last}") from last
+    warmup_note = f" (warm-up: {warmup_notes[0]})" if warmup_notes else ""
+    raise RuntimeError(
+        f"IDX fetch failed after plain requests + {attempts} rounds x {len(IDX_FINGERPRINTS)} "
+        f"fingerprints: {last}{warmup_note}"
+    ) from last
 
 
 def get_daily_data(date=None):

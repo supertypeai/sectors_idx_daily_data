@@ -27,6 +27,8 @@ load_dotenv('.env')
 # ── IQPlus primitives ────────────────────────────────────────────────────────
 
 OHL_COLS = ["open", "high", "low"]
+# The fill-missing path inserts a whole candle, so take close/volume from IQPlus too
+CANDLE_COLS = OHL_COLS + ["close", "volume"]
 IQPLUS_TIMEOUT = 20
 IQPLUS_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
@@ -41,7 +43,7 @@ def is_candle_valid(open_p, high_p, low_p, close_p) -> bool:
 def _ohl_from_row(row) -> dict:
     return {
         c: int(round(float(row[c])))
-        for c in OHL_COLS
+        for c in CANDLE_COLS
         if row.get(c) is not None and row[c] > 0
     }
 
@@ -57,8 +59,12 @@ def _ohl_for_date(rows: list, target_date_str: str) -> dict:
     return {}
 
 
-def _fetch_iqplus_rows(symbol: str, session: requests.Session = None) -> list:
-    """Full OHLCV history for a symbol from IQPlus (newest last); [] on failure."""
+def _fetch_iqplus_rows(symbol: str, session: requests.Session = None, failures: list = None) -> list:
+    """Full OHLCV history for a symbol from IQPlus (newest last); [] on failure.
+
+    Failures are appended to `failures` (list append is thread-safe) so a rate-limited
+    run reports one summary instead of one line per symbol.
+    """
     code = symbol.replace(".JK", "").upper()
     http = session or requests
     try:
@@ -66,12 +72,17 @@ def _fetch_iqplus_rows(symbol: str, session: requests.Session = None) -> list:
             f"https://www.iqplus.info/api/v1/ohlcv.php?code={code}",
             headers=IQPLUS_HEADERS, timeout=IQPLUS_TIMEOUT,
         )
-        if resp.status_code != 200:
-            return []
-        return resp.json()
+        if resp.status_code == 200:
+            return resp.json()
+        reason = f"HTTP {resp.status_code}"
     except Exception as e:
-        print(f"⚠️ iqplus lookup failed for {symbol}: {e}", flush=True)
-        return []
+        reason = f"{type(e).__name__}: {e}"
+
+    if failures is None:
+        print(f"⚠️ iqplus {symbol}: {reason}", flush=True)
+    else:
+        failures.append(f"{symbol} {reason}")
+    return []
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
@@ -144,9 +155,13 @@ def main():
     symbols = sorted({r['symbol'] for rows in need.values() for r in rows})
     print(f'symbols={len(symbols)} workers={workers} (1 IQPlus call each)', flush=True)
 
+    fetch_failures = []
+
     def fetch(sym):
         for attempt in (1, 2):
-            rows = _fetch_iqplus_rows(sym, session=session)
+            # Only the last attempt is reported, so the summary counts symbols not retries
+            rows = _fetch_iqplus_rows(sym, session=session,
+                                      failures=fetch_failures if attempt == 2 else [])
             if rows or attempt == 2:
                 return rows
             time.sleep(2)
@@ -157,20 +172,25 @@ def main():
         for sym, rows in zip(symbols, ex.map(fetch, symbols)):
             history[sym] = rows
 
+    if fetch_failures:
+        preview = ', '.join(fetch_failures[:5])
+        more = f' ... (+{len(fetch_failures) - 5})' if len(fetch_failures) > 5 else ''
+        print(f'⚠️ iqplus fetch failed for {len(fetch_failures)}/{len(symbols)} symbols: '
+              f'{preview}{more}', flush=True)
+
     # ── apply per date ───────────────────────────────────────────────────────
     total_fixed = total_stuck = 0
     for date in dates:
         d_fixed = d_stuck = 0
         inserting = date in missing_dates
-        batch = []
+        batch, skipped = [], []
         for i, r in enumerate(need[date], 1):
             sym = r['symbol']
             iq = _ohl_for_date(history.get(sym, []), date)
 
             if not iq:
                 d_stuck += 1
-                if not inserting:
-                    print(f'[{date}] [{i}/{len(need[date])}] {sym:12} no IQPlus data -> left blank', flush=True)
+                skipped.append(sym)
                 continue
 
             c = iq.get('close', 0) if inserting else (r['close'] or 0)
@@ -188,7 +208,8 @@ def main():
                 batch.append({'date': date, 'symbol': sym, 'close': int(c),
                               'volume': int(iq.get('volume') or 0),
                               'open': int(o), 'high': int(h), 'low': int(l)})
-                d_fixed += 1
+                if not apply_:
+                    d_fixed += 1          # dry run: report what would be inserted
                 continue
 
             if apply_:
@@ -209,7 +230,14 @@ def main():
         if inserting and batch and apply_:
             for k in range(0, len(batch), 500):
                 sb.table('idx_daily_data').upsert(batch[k:k + 500]).execute()
+            d_fixed += len(batch)          # only rows that actually landed
             print(f'[{date}] INSERTED {len(batch)} rows', flush=True)
+
+        if skipped:
+            preview = ', '.join(skipped[:5])
+            more = f' ... (+{len(skipped) - 5})' if len(skipped) > 5 else ''
+            print(f'[{date}] no IQPlus data for {len(skipped)} symbols -> '
+                  f'{"skipped" if inserting else "left blank"}: {preview}{more}', flush=True)
 
         total_fixed += d_fixed
         total_stuck += d_stuck
