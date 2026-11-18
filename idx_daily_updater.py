@@ -44,6 +44,11 @@ def _proxies():
     return {"http": proxy, "https": proxy} if proxy else None
 
 
+def _is_json_body(response) -> bool:
+    """Cloudflare sometimes answers 200 with its HTML challenge page instead of JSON."""
+    return response.text.lstrip().startswith("{")
+
+
 def _fetch_plain(url, headers, proxies, timeout):
     session = requests.Session()
     try:
@@ -57,6 +62,8 @@ def _fetch_plain(url, headers, proxies, timeout):
             timeout=timeout,   # (connect, read)
         )
         response.raise_for_status()
+        if not _is_json_body(response):
+            raise ValueError(f"non-JSON body (HTTP {response.status_code}) - likely a challenge page")
         return response
     finally:
         session.close()   # the body is already buffered, so closing here is safe
@@ -102,6 +109,8 @@ def _fetch_summary(url, headers, timeout=(10, 30), attempts=IDX_ROUNDS):
                     warmup_notes.append(f"{imp}: {type(warmup_error).__name__}")
                 response = session.get(url, headers=fingerprint_headers, timeout=timeout)
                 response.raise_for_status()
+                if not _is_json_body(response):
+                    raise ValueError(f"non-JSON body (HTTP {response.status_code}) - likely a challenge page")
                 return response
             except Exception as e:
                 last = e
