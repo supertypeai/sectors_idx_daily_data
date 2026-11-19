@@ -19,9 +19,11 @@ import logging
 LOG_FILENAME = 'daily_data_scrapper.log'
 IDX_HOME = 'https://www.idx.co.id/en/'
 REFRESH_DAYS = 2
-# Cloudflare accepts some TLS fingerprints and rejects the rest, and that set rotates
-# over days, so try a short ladder per round instead of pinning one.
-IDX_FINGERPRINTS = ['safari17_0', 'chrome124', 'chrome131']
+# Cloudflare accepts some TLS fingerprints and rejects the rest, and that set rotates over
+# days. Measured 19 Nov: only these two pass every IDX endpoint, and they pass reliably;
+# chrome131_android/chrome119 pass intermittently (same endpoint, 200/403 in one loop), so
+# they stay out of the ladder.
+IDX_FINGERPRINTS = ['safari17_0', 'safari17_2_ios']
 IDX_ROUNDS = 2
 IDX_BACKOFF_SECONDS = 5
 IDX_WARMUP_TIMEOUT = 5
@@ -96,27 +98,38 @@ def _fetch_summary(url, headers, timeout=(10, 30), attempts=IDX_ROUNDS):
     # The impersonated client sets its own User-Agent; keep our headers from overriding it
     fingerprint_headers = {k: v for k, v in headers.items() if k.lower() != "user-agent"}
 
+    # Proxy first (it exists to hide the runner IP), then a direct connection: the proxy
+    # stalls often enough that a healthy direct route is worth trying before giving up.
+    routes = [proxies, None] if proxies else [None]
+
     warmup_notes = []
     for round_no in range(1, attempts + 1):
         for imp in IDX_FINGERPRINTS:
-            session = cffi_requests.Session(impersonate=imp, proxies=proxies, verify=False)
-            try:
-                # The warm-up only seeds Cloudflare cookies: a slow home page must not stop
-                # us from calling the API itself, which is the part that has to succeed.
+            for route in routes:
+                where = "proxy" if route else "direct"
+                session = cffi_requests.Session(impersonate=imp, proxies=route, verify=False)
                 try:
-                    session.get(IDX_HOME, timeout=IDX_WARMUP_TIMEOUT)
-                except Exception as warmup_error:
-                    warmup_notes.append(f"{imp}: {type(warmup_error).__name__}")
-                response = session.get(url, headers=fingerprint_headers, timeout=timeout)
-                response.raise_for_status()
-                if not _is_json_body(response):
-                    raise ValueError(f"non-JSON body (HTTP {response.status_code}) - likely a challenge page")
-                return response
-            except Exception as e:
-                last = e
-                print(f"⚠️ IDX {imp} round {round_no}/{attempts} failed: {type(e).__name__}: {e}")
-            finally:
-                session.close()
+                    # The warm-up only seeds Cloudflare cookies: a slow home page must not
+                    # stop us from calling the API itself, which is the part that has to work.
+                    try:
+                        session.get(IDX_HOME, timeout=IDX_WARMUP_TIMEOUT)
+                    except Exception as warmup_error:
+                        warmup_notes.append(f"{imp}: {type(warmup_error).__name__}")
+                    response = session.get(url, headers=fingerprint_headers, timeout=timeout)
+                    response.raise_for_status()
+                    if not _is_json_body(response):
+                        raise ValueError(
+                            f"non-JSON body (HTTP {response.status_code}) - likely a challenge page"
+                        )
+                    return response
+                except Exception as e:
+                    # Blocking can be per-route (proxy IP vs direct), so keep trying the
+                    # other route and the next fingerprint before giving up
+                    last = e
+                    print(f"⚠️ IDX {imp} round {round_no}/{attempts} {where} failed: "
+                          f"{type(e).__name__}: {e}")
+                finally:
+                    session.close()
         if round_no < attempts:
             time.sleep(IDX_BACKOFF_SECONDS * round_no)
 
