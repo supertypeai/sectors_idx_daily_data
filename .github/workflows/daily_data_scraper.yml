@@ -10,6 +10,14 @@ on:
       date:
         description: 'Optional target date (YYYY-MM-DD). Defaults to today (Asia/Jakarta).'
         required: false
+      mode:
+        description: 'today = scrape today (18:00 WIB run); yesterday = recheck the closed day (01:00 WIB run)'
+        required: false
+        default: today
+        type: choice
+        options:
+          - today
+          - yesterday
   # 18:00 UTC = 01:00 WIB Tue-Sat. GH queue drift on this slot runs 3-6h, so it lands
   # ~04:00-06:42 WIB; the target is still "yesterday in Asia/Jakarta" (day-1 in WIB),
   # which is the trading day that just closed. A run with zero drift at 01:00 WIB is
@@ -44,19 +52,21 @@ jobs:
       id: target
       run: |
         if [ "${{ github.event_name }}" = "schedule" ]; then
-          DATE=$(TZ=Asia/Jakarta date -d yesterday +%F)   # 04:00 WIB -> day-1
+          DATE=$(TZ=Asia/Jakarta date -d yesterday +%F)   # 01:00 WIB -> the closed day
         elif [ -n "${{ inputs.date }}" ]; then
           DATE="${{ inputs.date }}"
+        elif [ "${{ inputs.mode }}" = "yesterday" ]; then
+          DATE=$(TZ=Asia/Jakarta date -d yesterday +%F)   # 01:00 WIB recheck -> the closed day
         else
           DATE=$(TZ=Asia/Jakarta date +%F)                # 18:00 WIB -> today
         fi
         echo "run_date=$DATE" >> "$GITHUB_OUTPUT"
         echo "Target date: $DATE"
 
-    # Re-scrape day-1 only when the 18:00 run left it missing or incomplete; otherwise repair alone.
+    # Re-scrape the target only when it is missing or incomplete; otherwise repair alone.
     - name: Check if target date is missing
       id: check
-      if: github.event_name == 'schedule'
+      if: github.event_name == 'schedule' || inputs.mode == 'yesterday'
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -96,7 +106,7 @@ jobs:
 
     - name: Run Daily Data Scraper
       id: scrape
-      if: github.event_name == 'workflow_dispatch' || steps.check.outputs.missing == 'true'
+      if: github.event_name == 'workflow_dispatch' && inputs.mode != 'yesterday' || steps.check.outputs.missing == 'true'
       continue-on-error: true
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
