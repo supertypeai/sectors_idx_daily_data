@@ -18,12 +18,10 @@ on:
         options:
           - today
           - yesterday
-  # 18:00 UTC = 01:00 WIB Tue-Sat. GH queue drift on this slot runs 3-6h, so it lands
-  # ~04:00-06:42 WIB; the target is still "yesterday in Asia/Jakarta" (day-1 in WIB),
-  # which is the trading day that just closed. A run with zero drift at 01:00 WIB is
-  # also fine: IDX publishes the day-1 summary after the ~16:00 WIB close.
-  schedule:
-    - cron: '0 18 * * 1-5'
+  # Both slots are driven by cron-job.org (workflow_dispatch via the GitHub REST API):
+  #   18:00 WIB -> {"inputs":{"mode":"today"}}      scrape today
+  #   01:00 WIB -> {"inputs":{"mode":"yesterday"}}  recheck the closed day
+  # No on.schedule here on purpose: GH cron drifts 5-8.7h and would duplicate both jobs.
 
 concurrency:
   group: daily-scraper

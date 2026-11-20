@@ -20,10 +20,11 @@ LOG_FILENAME = 'daily_data_scrapper.log'
 IDX_HOME = 'https://www.idx.co.id/en/'
 REFRESH_DAYS = 2
 # Cloudflare accepts some TLS fingerprints and rejects the rest, and that set rotates over
-# days. Measured 19 Nov: only these two pass every IDX endpoint, and they pass reliably;
-# chrome131_android/chrome119 pass intermittently (same endpoint, 200/403 in one loop), so
-# they stay out of the ladder.
-IDX_FINGERPRINTS = ['safari17_0', 'safari17_2_ios']
+# days. Verified 20 Nov on 7 IDX endpoints + 8x soak: firefox133 and tor145 pass reliably;
+# the 19 Nov winners (safari17_0, safari17_2_ios) are 403 today but kept at the bottom so a
+# rotation back costs one extra try instead of a failed run. chrome131_android flips
+# 403/200 on the same URL, so it is deliberately not in the ladder.
+IDX_FINGERPRINTS = ['firefox133', 'tor145', 'safari17_0', 'safari17_2_ios']
 IDX_ROUNDS = 2
 IDX_BACKOFF_SECONDS = 5
 IDX_WARMUP_TIMEOUT = 5
