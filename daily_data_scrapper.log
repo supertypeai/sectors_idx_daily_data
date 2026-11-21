@@ -502,3 +502,7 @@
 2026-11-20 11:01:13,647 - INFO: 🟢 Finish upserting data for 2026-11-20, with 944 companies appended
 2026-11-20 11:01:20,812 - INFO: 🟢 Finish upserting data for 2026-11-19, with 944 companies appended
 2026-11-20 11:01:29,246 - INFO: 🟢 Finish upserting data for 2026-11-18, with 944 companies appended
+2026-11-21 21:00:47,758 - INFO: Daily data scrapper started
+2026-11-21 21:03:42,193 - INFO: ⚪ No trading data for 2026-11-21, nothing to upsert
+2026-11-21 21:06:28,653 - INFO: 🟢 Finish upserting data for 2026-11-20, with 944 companies appended
+2026-11-21 21:08:12,646 - INFO: 🟢 Finish upserting data for 2026-11-19, with 944 companies appended
