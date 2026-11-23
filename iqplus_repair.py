@@ -30,6 +30,8 @@ OHL_COLS = ["open", "high", "low"]
 # The fill-missing path inserts a whole candle, so take close/volume from IQPlus too
 CANDLE_COLS = OHL_COLS + ["close", "volume"]
 IQPLUS_TIMEOUT = 20
+# Liquid name used to check how far IQPlus has published; any active ticker works
+PROBE_SYMBOL = "BBCA.JK"
 IQPLUS_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 
@@ -151,8 +153,28 @@ def main():
               f'{"FILL MISSING" if date in missing_dates else ""} '
               f'mode={"APPLY" if apply_ else "DRY RUN"}', flush=True)
 
-    # ── one IQPlus call per unique symbol ────────────────────────────────────
+    # ── skip dates IQPlus has not published yet ──────────────────────────────
+    # One probe costs ~15s; the full sweep costs ~10 min to discover the same thing.
     symbols = sorted({r['symbol'] for rows in need.values() for r in rows})
+    skipped_dates = set()
+    probe_calls = 0
+    if symbols:
+        probe_symbol = PROBE_SYMBOL if PROBE_SYMBOL in symbols else symbols[0]
+        probe_rows = _fetch_iqplus_rows(probe_symbol, session=session)
+        probe_calls = 1
+        if probe_rows:
+            newest = max(r['time'] for r in probe_rows)
+            stale = [d for d in dates if d > newest]
+            if stale:
+                skipped_dates.update(stale)
+                print(f'⚠️ IQPlus newest bar is {newest} ({probe_symbol}); '
+                      f'skipping {stale} - not published yet', flush=True)
+                for d in stale:
+                    need.pop(d, None)
+                    missing_dates.discard(d)
+                symbols = sorted({r['symbol'] for rows in need.values() for r in rows})
+
+    # ── one IQPlus call per unique symbol ────────────────────────────────────
     print(f'symbols={len(symbols)} workers={workers} (1 IQPlus call each)', flush=True)
 
     fetch_failures = []
@@ -241,11 +263,13 @@ def main():
 
         total_fixed += d_fixed
         total_stuck += d_stuck
-        print(f'[{date}] DONE fixed={d_fixed} unresolved={d_stuck}', flush=True)
+        skipped = ' (skipped: IQPlus has no bar yet)' if date in skipped_dates else ''
+        print(f'[{date}] DONE fixed={d_fixed} unresolved={d_stuck}{skipped}', flush=True)
 
     el = time.time() - t0
+    note = f' skipped={sorted(skipped_dates)}' if skipped_dates else ''
     print(f'--- TOTAL fixed={total_fixed} unresolved={total_stuck} dates={len(dates)} '
-          f'iqplus_calls={len(symbols)} elapsed={el:.0f}s '
+          f'iqplus_calls={len(symbols) + probe_calls} elapsed={el:.0f}s{note} '
           f'mode={"APPLY" if apply_ else "DRY RUN"}', flush=True)
 
 

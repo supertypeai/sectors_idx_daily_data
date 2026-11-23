@@ -264,23 +264,33 @@ if __name__ == "__main__":
     else:
         target = datetime.now(ZoneInfo('Asia/Jakarta')).date()
 
-    dates = [target] + _weekdays_before(target, REFRESH_DAYS)
-    print(f'Dates: {" ".join(str(d) for d in dates)} (target + {REFRESH_DAYS} prior weekdays)')
+    if target.weekday() >= 5:
+        # IDX does not trade on Saturday/Sunday: fetching the target only burns the
+        # fingerprint ladder on a date that can never return rows. Keep refreshing the
+        # prior weekdays so late corrections are still picked up.
+        print(f'{target} is a weekend - no session, skipping it')
+        dates = _weekdays_before(target, REFRESH_DAYS + 1)
+    else:
+        dates = [target] + _weekdays_before(target, REFRESH_DAYS)
+    print(f'Dates: {" ".join(str(d) for d in dates)}')
 
     existing = _fetch_existing_ohl(dates)
 
-    target_failed = False
+    # On a weekend the target is not fetched at all, so the refresh dates are what the run
+    # is really responsible for: a failure there must still mark the run red.
+    target_is_fetched = target in dates
+    run_failed = False
     for d in dates:
         date_str = d.strftime('%Y-%m-%d')
-        is_target = d == target
+        is_failure = (d == target) or not target_is_fetched
         try:
             upload_data, preserved = scrape_date(date_str, existing)
         except Exception as e:
             msg = f'🔴 Failed scraping IDX for {date_str}: {e}'
             print(msg)
             logging.error(msg)
-            if is_target:
-                target_failed = True
+            if is_failure:
+                run_failed = True
             continue
 
         if upload_data is None:
@@ -305,8 +315,8 @@ if __name__ == "__main__":
             msg = f'🔴 Failed upserting data for {date_str}: {e}'
             print(msg)
             logging.error(msg)
-            if is_target:
-                target_failed = True
+            if is_failure:
+                run_failed = True
 
-    if target_failed:
+    if run_failed:
         sys.exit(1)
