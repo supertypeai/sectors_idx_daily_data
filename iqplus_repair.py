@@ -75,7 +75,9 @@ def _fetch_iqplus_rows(symbol: str, session: requests.Session = None, failures: 
             headers=IQPLUS_HEADERS, timeout=IQPLUS_TIMEOUT,
         )
         if resp.status_code == 200:
-            return resp.json()
+            # IQPlus answers {"code","name","tf","data":[...]}; it used to serve the bare list
+            payload = resp.json()
+            return (payload.get("data") or []) if isinstance(payload, dict) else payload
         reason = f"HTTP {resp.status_code}"
     except Exception as e:
         reason = f"{type(e).__name__}: {e}"
