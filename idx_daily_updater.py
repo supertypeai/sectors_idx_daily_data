@@ -17,7 +17,6 @@ import sys
 import logging
 
 LOG_FILENAME = 'daily_data_scrapper.log'
-IDX_HOME = 'https://www.idx.co.id/en/'
 REFRESH_DAYS = 2
 # Cloudflare accepts some TLS fingerprints and rejects the rest, and that set rotates over
 # days. Verified 20 Nov on 7 IDX endpoints + 8x soak: firefox133 and tor145 pass reliably;
@@ -27,7 +26,6 @@ REFRESH_DAYS = 2
 IDX_FINGERPRINTS = ['firefox133', 'tor145', 'safari17_0', 'safari17_2_ios']
 IDX_ROUNDS = 2
 IDX_BACKOFF_SECONDS = 5
-IDX_WARMUP_TIMEOUT = 5
 
 def initiate_logging(LOG_FILENAME):
     reload(logging)
@@ -103,19 +101,12 @@ def _fetch_summary(url, headers, timeout=(10, 30), attempts=IDX_ROUNDS):
     # stalls often enough that a healthy direct route is worth trying before giving up.
     routes = [proxies, None] if proxies else [None]
 
-    warmup_notes = []
     for round_no in range(1, attempts + 1):
         for imp in IDX_FINGERPRINTS:
             for route in routes:
                 where = "proxy" if route else "direct"
                 session = cffi_requests.Session(impersonate=imp, proxies=route, verify=False)
                 try:
-                    # The warm-up only seeds Cloudflare cookies: a slow home page must not
-                    # stop us from calling the API itself, which is the part that has to work.
-                    try:
-                        session.get(IDX_HOME, timeout=IDX_WARMUP_TIMEOUT)
-                    except Exception as warmup_error:
-                        warmup_notes.append(f"{imp}: {type(warmup_error).__name__}")
                     response = session.get(url, headers=fingerprint_headers, timeout=timeout)
                     response.raise_for_status()
                     if not _is_json_body(response):
@@ -134,10 +125,9 @@ def _fetch_summary(url, headers, timeout=(10, 30), attempts=IDX_ROUNDS):
         if round_no < attempts:
             time.sleep(IDX_BACKOFF_SECONDS * round_no)
 
-    warmup_note = f" (warm-up: {warmup_notes[0]})" if warmup_notes else ""
     raise RuntimeError(
         f"IDX fetch failed after plain requests + {attempts} rounds x {len(IDX_FINGERPRINTS)} "
-        f"fingerprints: {last}{warmup_note}"
+        f"fingerprints: {last}"
     ) from last
 
 
