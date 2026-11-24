@@ -85,6 +85,7 @@ def main():
     null_core = [r['symbol'] for r in rows if r['close'] is None or r['volume'] is None]
     bad_range = [r['symbol'] for r in rows
                  if None not in (r['close'], r['low'], r['high'])
+                 and min(r['low'], r['high'], r['close']) > 0   # zero OHL = no trade, not bad data
                  and not r['low'] <= r['close'] <= r['high']]
 
     if zero_ohl:
