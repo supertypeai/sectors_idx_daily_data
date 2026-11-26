@@ -1,15 +1,12 @@
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 import pandas as pd
-import urllib.request
 import os
 import random
 import json
-import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from supabase import create_client
+
+from idx_fetch import idx_get
 from dotenv import load_dotenv
 from importlib import reload
 import sys
@@ -23,10 +20,6 @@ REFRESH_DAYS = 2
 # the 19 Nov winners (safari17_0, safari17_2_ios) are 403 today but kept at the bottom so a
 # rotation back costs one extra try instead of a failed run. chrome131_android flips
 # 403/200 on the same URL, so it is deliberately not in the ladder.
-IDX_FINGERPRINTS = ['firefox133', 'tor145', 'safari17_0', 'safari17_2_ios']
-IDX_ROUNDS = 2
-IDX_BACKOFF_SECONDS = 5
-
 def initiate_logging(LOG_FILENAME):
     reload(logging)
 
@@ -45,92 +38,6 @@ def _proxies():
     return {"http": proxy, "https": proxy} if proxy else None
 
 
-def _is_json_body(response) -> bool:
-    """Cloudflare sometimes answers 200 with its HTML challenge page instead of JSON."""
-    return response.text.lstrip().startswith("{")
-
-
-def _fetch_plain(url, headers, proxies, timeout):
-    session = requests.Session()
-    try:
-        session.mount("https://", HTTPAdapter(max_retries=Retry(
-            total=3, connect=3, read=3, backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["GET"],
-        )))
-        response = session.get(
-            url, headers=headers, proxies=proxies,
-            verify=False,      # disables SSL cert check
-            timeout=timeout,   # (connect, read)
-        )
-        response.raise_for_status()
-        if not _is_json_body(response):
-            raise ValueError(f"non-JSON body (HTTP {response.status_code}) - likely a challenge page")
-        return response
-    finally:
-        session.close()   # the body is already buffered, so closing here is safe
-
-
-def _fetch_summary(url, headers, timeout=(10, 30), attempts=IDX_ROUNDS):
-    """GET the IDX summary, plain requests first, browser fingerprint after.
-
-    Cloudflare fingerprints plain urllib3, so that path only works when the proxy exit
-    IP is trusted. When it is exhausted, retry with curl_cffi's browser TLS fingerprint
-    and the cookies seeded from the public page, which the same endpoint answers in
-    well under a second.
-    """
-    try:
-        from curl_cffi import requests as cffi_requests
-    except ImportError:
-        cffi_requests = None
-
-    proxies = _proxies()
-
-    try:
-        return _fetch_plain(url, headers, proxies, timeout)
-    except Exception as e:
-        last = e
-        print(f"⚠️ plain fetch failed: {type(e).__name__}: {e}")
-
-    if cffi_requests is None:
-        raise RuntimeError(f"IDX fetch failed: {last}") from last
-
-    # The impersonated client sets its own User-Agent; keep our headers from overriding it
-    fingerprint_headers = {k: v for k, v in headers.items() if k.lower() != "user-agent"}
-
-    # Proxy first (it exists to hide the runner IP), then a direct connection: the proxy
-    # stalls often enough that a healthy direct route is worth trying before giving up.
-    routes = [proxies, None] if proxies else [None]
-
-    for round_no in range(1, attempts + 1):
-        for imp in IDX_FINGERPRINTS:
-            for route in routes:
-                where = "proxy" if route else "direct"
-                session = cffi_requests.Session(impersonate=imp, proxies=route, verify=False)
-                try:
-                    response = session.get(url, headers=fingerprint_headers, timeout=timeout)
-                    response.raise_for_status()
-                    if not _is_json_body(response):
-                        raise ValueError(
-                            f"non-JSON body (HTTP {response.status_code}) - likely a challenge page"
-                        )
-                    return response
-                except Exception as e:
-                    # Blocking can be per-route (proxy IP vs direct), so keep trying the
-                    # other route and the next fingerprint before giving up
-                    last = e
-                    print(f"⚠️ IDX {imp} round {round_no}/{attempts} {where} failed: "
-                          f"{type(e).__name__}: {e}")
-                finally:
-                    session.close()
-        if round_no < attempts:
-            time.sleep(IDX_BACKOFF_SECONDS * round_no)
-
-    raise RuntimeError(
-        f"IDX fetch failed after plain requests + {attempts} rounds x {len(IDX_FINGERPRINTS)} "
-        f"fingerprints: {last}"
-    ) from last
-
-
 def get_daily_data(date=None):
 
     # optional CLI date lets a missed day be re-run; defaults to today
@@ -138,23 +45,10 @@ def get_daily_data(date=None):
 
     url = f"https://www.idx.co.id/primary/TradingSummary/GetStockSummary?length=9999&start=0&date={end.strftime('%Y%m%d')}"
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/119.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": "https://www.idx.co.id/",
-    }
-
-    response = _fetch_summary(url, headers)
-
-    payload = response.json()
+    payload = json.loads(idx_get(url, kind="json", proxies=_proxies(), timeout=(10, 30)))
     data = payload.get("data") if isinstance(payload, dict) else None
     if data is None:
-        raise ValueError(f"IDX returned no 'data' key for {end} (HTTP {response.status_code})")
+        raise ValueError(f"IDX returned no 'data' key for {end}")
     if not data:
         # IDX answers an empty list for a date it has no session for (holiday/weekend),
         # which is not a broken source: nothing to write, and the run should stay green.
